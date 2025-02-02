@@ -22,11 +22,7 @@ from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
 import bitsandbytes as bnb
-# from torchao.float8 import convert_to_float8_training, Float8LinearConfig
-# from torchao.utils import TORCH_VERSION_AT_LEAST_2_5
 
-# if not TORCH_VERSION_AT_LEAST_2_5:
-    # raise AssertionError("torchao.float8 requires PyTorch version 2.5 or greater")
 
 DEFAULT_PROMPT_TEMPLATE = {
     "template": (
@@ -398,29 +394,11 @@ def main(args):
             subfolder = "transformer",
             quantization_config = quant_config,
             torch_dtype = torch.bfloat16,
-            # device_map = "auto",
-        )#.to(device="cuda", dtype=torch.float8_e4m3fn)
+        )
         
         diffusion_model.requires_grad_(False)
         diffusion_model.enable_gradient_checkpointing()
         torch.cuda.empty_cache()
-    
-    # def module_filter_fn(mod: torch.nn.Module, fqn: str):
-        # don't convert these modules
-        # for filter_name in ["x_embedder", "context_embedder", "time_text_embed", "rope", "norm_out", "proj_out"]:
-            # if filter_name in fqn:
-                # print("skipped", fqn)
-                # return False
-        # don't convert linear modules with weight dimensions not divisible by 16
-        # if isinstance(mod, torch.nn.Linear):
-            # if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
-                # print("skipped", fqn)
-                # return False
-        # print("converted", fqn)
-        # return True
-    
-    # diffusion_model = diffusion_model.to("cuda")
-    # convert_to_float8_training(diffusion_model, module_filter_fn=module_filter_fn, config=Float8LinearConfig(pad_inner_dim=True))
     
     with timer("added LoRA in"):
         lora_params = []
