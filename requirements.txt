@@ -1,3 +1,4 @@
+torchao
 diffusers
 transformers
 accelerate
