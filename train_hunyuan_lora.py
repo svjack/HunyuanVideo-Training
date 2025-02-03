@@ -3,6 +3,7 @@ import gc
 import random
 import numpy as np
 import argparse
+import datetime
 from tqdm.auto import tqdm
 import decord
 from contextlib import contextmanager
@@ -15,7 +16,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms import v2, InterpolationMode
 from safetensors.torch import load_file, save_file
 
-import accelerate
 from transformers import CLIPTextModel, CLIPTokenizerFast, LlamaModel, LlamaTokenizerFast
 from diffusers import AutoencoderKLHunyuanVideo, HunyuanVideoTransformer3DModel, FlowMatchEulerDiscreteScheduler
 from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
@@ -129,6 +129,12 @@ def timer(message=""):
     print(f"{message} {end_time - start_time:0.2f} seconds")
 
 
+def make_dir(base, folder):
+    new_dir = os.path.join(base, folder)
+    os.makedirs(new_dir, exist_ok=True)
+    return new_dir
+
+
 def download_model():
     from huggingface_hub import snapshot_download
     snapshot_download(
@@ -199,13 +205,13 @@ def parse_args():
     parser.add_argument(
         "--num_frames",
         type = int,
-        default = 17,
+        default = 33,
         help = "Number of frames per video, must be divisible by 4+1"
         )
     parser.add_argument(
         "--learning_rate",
         type = float,
-        default = 1e-4,
+        default = 1e-3,
         help = "Base learning rate",
         )
     parser.add_argument(
@@ -217,13 +223,13 @@ def parse_args():
     parser.add_argument(
         "--test_steps",
         type = int,
-        default = 100,
+        default = 50,
         help = "Validate after every n steps",
         )
     parser.add_argument(
         "--checkpointing_steps",
         type = int,
-        default = 100,
+        default = 50,
         help = "Save a checkpoint of the training state every X steps",
         )
     parser.add_argument(
@@ -338,7 +344,10 @@ def main(args):
     np.random.seed(args.seed)
     random.seed(args.seed)
     
-    # set up output folder, logging
+    date_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    real_output_dir = make_dir(args.output_dir, date_time)
+    checkpoint_dir = make_dir(real_output_dir, "checkpoints")
+    t_writer = SummaryWriter(log_dir=real_output_dir, flush_secs=60)
     
     def collate_batch(batch):
         pixels = torch.cat([sample["pixels"] for sample in batch], dim=0)
@@ -379,15 +388,27 @@ def main(args):
     # noise_scheduler = FlowMatchEulerDiscreteScheduler()#.from_pretrained(args.pretrained_model, subfolder="scheduler")
     # print(noise_scheduler.sigmas[500])
     # print(noise_scheduler.timesteps[500])
-    # exit()
     
     with timer("loaded VAE in"):
         vae = AutoencoderKLHunyuanVideo.from_pretrained(args.pretrained_model, subfolder="vae").to(device="cuda", dtype=torch.float16)
         vae.requires_grad_(False)
-        vae.enable_tiling()
+        vae.enable_tiling(
+            tile_sample_min_height = 256,
+            tile_sample_min_width = 256,
+            tile_sample_min_num_frames = 64,
+            tile_sample_stride_height = 192,
+            tile_sample_stride_width = 192,
+            tile_sample_stride_num_frames = 16,
+        )
     
     with timer("loaded diffusion model in"):
-        quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
+        # quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
+        quant_config = DiffusersBitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
         
         diffusion_model = HunyuanVideoTransformer3DModel.from_pretrained(
             args.pretrained_model,
@@ -403,11 +424,11 @@ def main(args):
     with timer("added LoRA in"):
         lora_params = []
         attn_blocks = ["transformer_blocks", "single_transformer_blocks"]
-        attn_keys = ["to_k", "to_q", "to_v", "to_out.0"]
+        attn_keys = ["to_k", "to_q", "to_v", "to_out.0", "proj_mlp"]
         for name, param in diffusion_model.named_parameters():
             name = name.replace(".weight", "").replace(".bias", "")
             for block in attn_blocks:
-                if block in name:
+                if name.startswith(block):
                     for key in attn_keys:
                         if key in name:
                             lora_params.append(name)
@@ -429,7 +450,19 @@ def main(args):
                 total_parameters += param.numel()
     print(f"total trainable parameters: {total_parameters:,}")
     
-    optimizer = bnb.optim.AdamW8bit(lora_parameters, lr=args.learning_rate)
+    # Instead of having just *one* optimizer, we will have a ``dict`` of optimizers
+    # for every parameter so we could reference them in our hook.
+    optimizer_dict = {p: bnb.optim.AdamW8bit([p], lr=args.learning_rate) for p in lora_parameters}
+    
+    # Define our hook, which will call the optimizer step() and zero_grad()
+    def optimizer_hook(parameter) -> None:
+        optimizer_dict[parameter].step()
+        optimizer_dict[parameter].zero_grad()
+    
+    # Register the hook onto every parameter
+    for p in lora_parameters:
+        p.register_post_accumulate_grad_hook(optimizer_hook)
+    
     gc.collect()
     torch.cuda.empty_cache()
     diffusion_model.train()
@@ -438,7 +471,6 @@ def main(args):
     progress_bar = tqdm(range(0, args.max_train_steps))
     while global_step < args.max_train_steps:
         for step, batch in enumerate(train_dataloader):
-            optimizer.zero_grad()
             pixels, clip_embed, llama_embed, llama_mask = batch
             
             with torch.inference_mode():
@@ -455,30 +487,24 @@ def main(args):
                 guidance_scale = 1.0
                 guidance = torch.tensor([guidance_scale] * latents.shape[0], dtype=torch.float32, device="cuda") * 1000.0
             
-            noisy_model_input = noisy_model_input.to(device="cuda", dtype=torch.bfloat16)
-            timesteps = timesteps.to(device="cuda", dtype=torch.bfloat16)
-            llama_embed = llama_embed.to(device="cuda", dtype=torch.bfloat16)
-            llama_mask = llama_mask.to(device="cuda", dtype=torch.bfloat16)
-            clip_embed = clip_embed.to(device="cuda", dtype=torch.bfloat16)
-            guidance = guidance.to(device="cuda", dtype=torch.bfloat16)
-            
             torch.cuda.empty_cache()
             pred = diffusion_model(
-                hidden_states = noisy_model_input,
-                timestep = timesteps,
-                encoder_hidden_states = llama_embed,
-                encoder_attention_mask = llama_mask,
-                pooled_projections = clip_embed,
-                guidance = guidance,
-                return_dict=False,
+                hidden_states           =  noisy_model_input.to(device="cuda", dtype=torch.bfloat16),
+                timestep                =          timesteps.to(device="cuda", dtype=torch.bfloat16),
+                encoder_hidden_states   =        llama_embed.to(device="cuda", dtype=torch.bfloat16),
+                encoder_attention_mask  =         llama_mask.to(device="cuda", dtype=torch.bfloat16),
+                pooled_projections      =         clip_embed.to(device="cuda", dtype=torch.bfloat16),
+                guidance                =           guidance.to(device="cuda", dtype=torch.bfloat16),
+                return_dict = False,
             )[0]
             loss = F.mse_loss(pred.float(), (noise - latents).to(pred.device).float())
+            t_writer.add_scalar("loss/train", loss.detach().item(), global_step)
             progress_bar.set_postfix({'loss': f"{loss.detach().item():0.3f}"})
             
             loss.backward()
-            optimizer.step()
             progress_bar.update(1)
             global_step += 1
+            torch.cuda.empty_cache()
             
             # if global_step == 1 or global_step % val_steps == 0:
                 # with torch.inference_mode(), temp_rng(val_seed):
@@ -487,17 +513,17 @@ def main(args):
                         # val_loss += get_pred(batch, timestep_range=(100, 900))[0].detach().item()
                     # t_writer.add_scalar("loss/validation", val_loss / len(val_dataloader), global_step * batch_size)
             
-            # if global_step >= args.max_train_steps or global_step % save_steps == 0:
-                # checkpoint_path = os.path.join(output_path, f"checkpoint-{global_step:08}")
-                # unet.save_pretrained(os.path.join(checkpoint_path, "unet"), safe_serialization=True)
+            if global_step >= args.max_train_steps or global_step % args.checkpointing_steps == 0:
+                save_file(
+                    get_peft_model_state_dict(diffusion_model),
+                    os.path.join(checkpoint_dir, f"hyv-lora-{global_step:08}.safetensors"),
+                )
             
             if global_step >= args.max_train_steps:
                 break
 
 # train
     # basic t2i and randn noise to start
-    # gradient checkpointing by default
-    # AdamW8bit by default
     # guidance?
 
 
@@ -506,8 +532,10 @@ if __name__ == "__main__":
     
     if args.download_model:
         download_model()
+        exit()
     
     if args.cache_embeddings:
         cache_embeddings(args)
+        exit()
     
     main(args)
