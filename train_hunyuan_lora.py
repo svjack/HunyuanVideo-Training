@@ -4,7 +4,7 @@ import random
 import numpy as np
 import argparse
 import datetime
-from tqdm.auto import tqdm
+from tqdm import tqdm
 import decord
 from contextlib import contextmanager
 from time import perf_counter
@@ -76,154 +76,34 @@ BUCKET_RESOLUTIONS = {
     ],
 }
 
-def get_ar_buckets(width, height):
-    ar = width / height
-    
-    if ar > 1.555:
-        buckets = BUCKET_RESOLUTIONS["16x9"]
-    elif ar > 1.166:
-        buckets = BUCKET_RESOLUTIONS["4x3"]
-    elif ar > 0.875:
-        buckets = BUCKET_RESOLUTIONS["1x1"]
-    elif ar > 0.656:
-        buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["4x3"]]
-    else:
-        buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["16x9"]]
-    
-    return [b for b in buckets if b[0] <= width and b[1] <= height]
-
 def count_tokens(width, height, frames):
     return (width // 16) * (height // 16) * ((frames - 1) // 4 + 1)
 
-def find_max_frames(width, height, token_limit):
-    frames = 1
-    tokens = count_tokens(width, height, frames)
-    while tokens < token_limit:
-        new_frames = frames + 4
-        new_tokens = count_tokens(width, height, new_frames)
-        if new_tokens < token_limit:
-            frames = new_frames
-            tokens = new_tokens
-        else:
-            return frames
-
-
-class PexelsDataset(Dataset):
-    def __init__(self, root_folder, resolution=512, num_frames=17, limit_samples=None, max_frame_stride=2):
-        self.root_folder = root_folder
-        self.resolution = resolution
-        self.num_frames = num_frames
-        self.max_frame_stride = max_frame_stride
-        self.videos_folders = os.listdir(self.root_folder)
-        
-        if limit_samples is not None:
-            stride = max(1, len(self.videos_folders) // limit_samples)
-            self.videos_folders = self.videos_folders[::stride]
-            self.videos_folders = self.videos_folders[:limit_samples]
-        
-        self.transforms = v2.Compose([
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Resize(
-                size = self.resolution,
-                interpolation = InterpolationMode.BILINEAR,
-                antialias = True,
-            ),
-            v2.CenterCrop(size=self.resolution),
-        ])
-    
-    def __len__(self):
-        return len(self.videos_folders)
-    
-    def __getitem__(self, idx):
-        video_id = self.videos_folders[idx]
-        video_folder = os.path.join(self.root_folder, video_id)
-        video_file = os.path.join(video_folder, video_id) + ".mp4"
-        
-        vr = decord.VideoReader(video_file)
-        stride = min(random.randint(1, self.max_frame_stride), len(vr) // self.num_frames)
-        
-        if stride > 0:
-            seg_len = stride * self.num_frames
-            start_frame = random.randint(0, len(vr) - seg_len)
-            pixels = vr[start_frame : start_frame+seg_len : stride]
-        else:
-            pixels = vr[:]
-        
-        while pixels.shape[0] < self.num_frames:
-            pixels = torch.cat([pixels, pixels[-1].unsqueeze(0)], dim=0)
-        
-        pixels = pixels.movedim(3, 1).unsqueeze(0).contiguous() # FHWC -> FCHW -> BFCHW
-        pixels = self.transforms(pixels) * 2 - 1
-        pixels = torch.clamp(torch.nan_to_num(pixels), min=-1, max=1)
-        
-        embedding_file = ["caption_original_hyv.safetensors", "caption_florence_hyv.safetensors"][random.randint(0, 1)]
-        embedding_dict = load_file(os.path.join(video_folder, embedding_file))
-        
-        return {"pixels": pixels, "embedding_dict": embedding_dict}
-
-
-class VideoDataset(Dataset):
-    def __init__(self, root_folder, resolution=512, num_frames=17, limit_samples=None, max_frame_stride=2):
-        self.root_folder = root_folder
-        self.resolution = resolution
-        self.num_frames = num_frames
-        self.max_frame_stride = max_frame_stride
-        self.videos_files = glob(os.path.join(self.root_folder, "**", "*.mp4" ), recursive=True)
-        
-        if limit_samples is not None:
-            stride = max(1, len(self.videos_files) // limit_samples)
-            self.videos_files = self.videos_files[::stride]
-            self.videos_files = self.videos_files[:limit_samples]
-        
-        self.transforms = v2.Compose([
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Resize(
-                size = self.resolution,
-                interpolation = InterpolationMode.BILINEAR,
-                antialias = True,
-            ),
-            v2.CenterCrop(size=self.resolution),
-        ])
-    
-    def __len__(self):
-        return len(self.videos_files)
-    
-    def __getitem__(self, idx):
-        vr = decord.VideoReader(self.videos_files[idx])
-        stride = min(random.randint(1, self.max_frame_stride), len(vr) // self.num_frames)
-        
-        if stride > 0:
-            seg_len = stride * self.num_frames
-            start_frame = random.randint(0, len(vr) - seg_len)
-            pixels = vr[start_frame : start_frame+seg_len : stride]
-        else:
-            pixels = vr[:]
-        
-        while pixels.shape[0] < self.num_frames:
-            pixels = torch.cat([pixels, pixels[-1].unsqueeze(0)], dim=0)
-        
-        pixels = pixels.movedim(3, 1).unsqueeze(0).contiguous() # FHWC -> FCHW -> BFCHW
-        pixels = self.transforms(pixels) * 2 - 1
-        pixels = torch.clamp(torch.nan_to_num(pixels), min=-1, max=1)
-        
-        embedding_file = os.path.splitext(self.videos_files[idx])[0] + "_hyv.safetensors"
-        embedding_dict = load_file(embedding_file)
-        
-        return {"pixels": pixels, "embedding_dict": embedding_dict}
-
 
 class CombinedDataset(Dataset):
-    def __init__(self, root_folder, token_limit=10_000, limit_samples=None, max_frame_stride=4):
+    def __init__(
+        self,
+        root_folder,
+        token_limit = 10_000,
+        limit_samples = None,
+        max_frame_stride = 4,
+        manual_resolution = None,
+        manual_frames = None,
+    ):
         self.root_folder = root_folder
         self.token_limit = token_limit
         self.max_frame_stride = max_frame_stride
+        self.manual_resolution = manual_resolution
+        self.manual_frames = manual_frames
         
+        # search for all files matching image or video extensions
         self.media_files = []
         for ext in IMAGE_TYPES + VIDEO_TYPES:
             self.media_files.extend(
                 glob(os.path.join(self.root_folder, "**", "*" + ext), recursive=True)
             )
         
+        # pull samples evenly from the whole dataset
         if limit_samples is not None:
             stride = max(1, len(self.media_files) // limit_samples)
             self.media_files = self.media_files[::stride]
@@ -232,31 +112,81 @@ class CombinedDataset(Dataset):
     def __len__(self):
         return len(self.media_files)
     
+    def find_max_frames(self, width, height):
+        if self.manual_frames is not None:
+            return self.manual_frames
+        
+        frames = 1
+        tokens = count_tokens(width, height, frames)
+        while tokens < self.token_limit:
+            new_frames = frames + 4
+            new_tokens = count_tokens(width, height, new_frames)
+            if new_tokens < self.token_limit:
+                frames = new_frames
+                tokens = new_tokens
+            else:
+                return frames
+    
+    def get_ar_buckets(self, width, height):
+        if self.manual_resolution is not None:
+            return [(self.manual_resolution, self.manual_resolution)]
+        
+        ar = width / height
+        if ar > 1.555:
+            buckets = BUCKET_RESOLUTIONS["16x9"]
+        elif ar > 1.166:
+            buckets = BUCKET_RESOLUTIONS["4x3"]
+        elif ar > 0.875:
+            buckets = BUCKET_RESOLUTIONS["1x1"]
+        elif ar > 0.656:
+            buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["4x3"]]
+        else:
+            buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["16x9"]]
+        
+        return [b for b in buckets if b[0] <= width and b[1] <= height]
+    
     def __getitem__(self, idx):
         ext = os.path.splitext(self.media_files[idx])[1].lower()
         if ext in IMAGE_TYPES:
             image = Image.open(self.media_files[idx]).convert('RGB')
             pixels = torch.as_tensor(np.array(image)).unsqueeze(0) # FHWC
-            buckets = get_ar_buckets(pixels.shape[1], pixels.shape[0])
+            buckets = self.get_ar_buckets(pixels.shape[1], pixels.shape[0])
             width, height = random.choice(buckets)
         else:
             vr = decord.VideoReader(self.media_files[idx])
             orig_height, orig_width = vr[0].shape[:2]
             orig_frames = len(vr)
             
-            buckets = get_ar_buckets(orig_width, orig_height)
+            # randomize resolution bucket and frame length
+            buckets = self.get_ar_buckets(orig_width, orig_height)
             width, height = random.choice(buckets)
-            max_frames = find_max_frames(width, height, self.token_limit)
+            max_frames = self.find_max_frames(width, height)
             stride = max(min(random.randint(1, self.max_frame_stride), orig_frames // max_frames), 1)
             
+            # sample a clip from the video based on frame stride and length
             seg_len = min(stride * max_frames, orig_frames)
             start_frame = random.randint(0, orig_frames - seg_len)
             pixels = vr[start_frame : start_frame+seg_len : stride]
             max_frames = ((pixels.shape[0] - 1) // 4) * 4 + 1
             pixels = pixels[:max_frames] # clip frames to match vae
         
+        # determine crop dimensions to prevent stretching during resize
+        pixels_ar = pixels.shape[2] / pixels.shape[1]
+        target_ar = width / height
+        if pixels_ar > target_ar:
+            crop_width = min(int(pixels.shape[1] * target_ar), pixels.shape[2])
+            crop_height = pixels.shape[1]
+        elif pixels_ar < target_ar:
+            crop_width = pixels.shape[2]
+            crop_height = min(int(pixels.shape[2] / target_ar), pixels.shape[1])
+        else:
+            crop_width = pixels.shape[2]
+            crop_height = pixels.shape[1]
+        
+        # convert to expected dtype, resolution, shape, and value range
         transform = v2.Compose([
             v2.ToDtype(torch.float32, scale=True),
+            v2.RandomCrop(size=(crop_height, crop_width)),
             v2.Resize(size=(height, width)),
         ])
         
@@ -264,6 +194,7 @@ class CombinedDataset(Dataset):
         pixels = transform(pixels) * 2 - 1
         pixels = torch.clamp(torch.nan_to_num(pixels), min=-1, max=1)
         
+        # load precomputed text embeddings from file
         embedding_file = os.path.splitext(self.media_files[idx])[0] + "_hyv.safetensors"
         if not os.path.exists(embedding_file):
             embedding_file = os.path.join(
@@ -378,18 +309,18 @@ def parse_args():
         default = 42,
         help = "Seed for reproducible training"
         )
-    # parser.add_argument(
-        # "--resolution",
-        # type = int,
-        # default = 512,
-        # help = "Base resolution for training/testing"
-        # )
-    # parser.add_argument(
-        # "--num_frames",
-        # type = int,
-        # default = 33,
-        # help = "Number of frames per video, must be divisible by 4+1"
-        # )
+    parser.add_argument(
+        "--resolution",
+        type = int,
+        default = None,
+        help = "Manual override resolution for training/testing"
+        )
+    parser.add_argument(
+        "--num_frames",
+        type = int,
+        default = None,
+        help = "Manual override number of frames per video, must be divisible by 4+1"
+        )
     parser.add_argument(
         "--token_limit",
         type = int,
@@ -578,12 +509,16 @@ def main(args):
             root_folder = train_dataset,
             token_limit = args.token_limit,
             max_frame_stride = args.max_frame_stride,
+            manual_resolution = args.resolution,
+            manual_frames = args.num_frames,
         )
         val_dataset = CombinedDataset(
             root_folder = val_dataset,
             token_limit = args.token_limit,
             limit_samples = args.val_samples,
             max_frame_stride = args.max_frame_stride,
+            manual_resolution = args.resolution,
+            manual_frames = args.num_frames,
         )
     
     train_dataloader = DataLoader(
@@ -697,6 +632,7 @@ def main(args):
         if args.warped_noise:
             noise = get_warped_noise(
                 pixels.movedim(2, 1)[0], # BCFHW -> BFCHW -> FCHW
+                degradation = torch.rand(1).item(),
                 noise_channels = 16,
                 target_latent_count = latents.shape[2],
             ).movedim(0, 1).unsqueeze(0).to(latents) # FCHW -> CFHW -> BCFHW
