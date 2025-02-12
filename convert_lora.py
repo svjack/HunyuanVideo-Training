@@ -7,7 +7,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 
-def convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict):
+def convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict, alpha=1.0):
     converted_state_dict = {k: diffusers_state_dict.pop(k) for k in list(diffusers_state_dict.keys())}
 
     TRANSFORMER_KEYS_RENAME_DICT = {
@@ -125,15 +125,6 @@ def convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict):
             new_key = new_key.replace(replace_key, rename_key)
         converted_state_dict[new_key] = converted_state_dict.pop(key)
 
-    # Remove "transformer." prefix
-    # for key in list(converted_state_dict.keys()):
-        # if key.startswith("transformer."):
-            # converted_state_dict[key[len("transformer."):]] = converted_state_dict.pop(key)
-
-    # Add back "diffusion_model." prefix
-    # for key in list(converted_state_dict.keys()):
-        # converted_state_dict[f"diffusion_model.{key}"] = converted_state_dict.pop(key)
-    
     for key in list(converted_state_dict.keys()):
         converted_state_dict[f"transformer.{key}"] = converted_state_dict.pop(key)
     
@@ -143,6 +134,12 @@ def convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict):
     for key in list(converted_state_dict.keys()):
         converted_state_dict[key.replace(".single_transformer_blocks.", ".single_blocks.")] = converted_state_dict.pop(key)
     
+    if alpha is not None:
+        for key in list(converted_state_dict.keys()):
+            if ".lora_A.weight" in key:
+                alpha_name = key.replace(".lora_A.weight", ".alpha")
+                converted_state_dict[alpha_name] = torch.tensor([alpha], dtype=torch.float32)
+    
     return converted_state_dict
 
 
@@ -150,6 +147,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, required=True)
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--alpha", type=float, default=None)
     return parser.parse_args()
 
 
@@ -161,7 +159,7 @@ if __name__ == "__main__":
     elif args.input.endswith(".safetensors"):
         diffusers_state_dict = load_file(args.input)
 
-    original_format_state_dict = convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict)
+    original_format_state_dict = convert_diffusers_to_hunyuan_video_lora(diffusers_state_dict, alpha=args.alpha)
     
     if args.output is not None:
         output_path_or_name = Path(args.output)

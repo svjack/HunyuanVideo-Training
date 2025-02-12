@@ -8,6 +8,8 @@ from tqdm.auto import tqdm
 import decord
 from contextlib import contextmanager
 from time import perf_counter
+from glob import glob
+from PIL import Image
 
 import torch
 import torch.nn.functional as F
@@ -37,16 +39,85 @@ DEFAULT_PROMPT_TEMPLATE = {
     "crop_start": 95,
 }
 
+IMAGE_TYPES = [".jpg", ".png"]
+VIDEO_TYPES = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
 
-class VideoDataset(Dataset):
-    def __init__(self, root_folder, resolution=512, num_frames=17, limit_samples=None):
+BUCKET_RESOLUTIONS = {
+    "1x1": [
+        # (256, 256),
+        (384, 384),
+        (512, 512),
+        (640, 640),
+        (720, 720),
+        (768, 768),
+        (848, 848),
+        (960, 960),
+        (1024, 1024),
+    ],
+    "4x3": [
+        # (320, 240),
+        (384, 288),
+        (512, 384),
+        (640, 480),
+        (768, 576),
+        (960, 720),
+        (1024, 768),
+        (1152, 864),
+        (1280, 960),
+    ],
+    "16x9": [
+        # (256, 144),
+        (512, 288),
+        (768, 432),
+        (848, 480),
+        (960, 544),
+        (1024, 576),
+        (1280, 720),
+    ],
+}
+
+def get_ar_buckets(width, height):
+    ar = width / height
+    
+    if ar > 1.555:
+        buckets = BUCKET_RESOLUTIONS["16x9"]
+    elif ar > 1.166:
+        buckets = BUCKET_RESOLUTIONS["4x3"]
+    elif ar > 0.875:
+        buckets = BUCKET_RESOLUTIONS["1x1"]
+    elif ar > 0.656:
+        buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["4x3"]]
+    else:
+        buckets = [b[::-1] for b in BUCKET_RESOLUTIONS["16x9"]]
+    
+    return [b for b in buckets if b[0] <= width and b[1] <= height]
+
+def count_tokens(width, height, frames):
+    return (width // 16) * (height // 16) * ((frames - 1) // 4 + 1)
+
+def find_max_frames(width, height, token_limit):
+    frames = 1
+    tokens = count_tokens(width, height, frames)
+    while tokens < token_limit:
+        new_frames = frames + 4
+        new_tokens = count_tokens(width, height, new_frames)
+        if new_tokens < token_limit:
+            frames = new_frames
+            tokens = new_tokens
+        else:
+            return frames
+
+
+class PexelsDataset(Dataset):
+    def __init__(self, root_folder, resolution=512, num_frames=17, limit_samples=None, max_frame_stride=2):
         self.root_folder = root_folder
         self.resolution = resolution
         self.num_frames = num_frames
+        self.max_frame_stride = max_frame_stride
         self.videos_folders = os.listdir(self.root_folder)
         
         if limit_samples is not None:
-            stride = len(self.videos_folders) // limit_samples
+            stride = max(1, len(self.videos_folders) // limit_samples)
             self.videos_folders = self.videos_folders[::stride]
             self.videos_folders = self.videos_folders[:limit_samples]
         
@@ -69,7 +140,7 @@ class VideoDataset(Dataset):
         video_file = os.path.join(video_folder, video_id) + ".mp4"
         
         vr = decord.VideoReader(video_file)
-        stride = min(random.randint(1, 4), len(vr) // self.num_frames)
+        stride = min(random.randint(1, self.max_frame_stride), len(vr) // self.num_frames)
         
         if stride > 0:
             seg_len = stride * self.num_frames
@@ -87,6 +158,123 @@ class VideoDataset(Dataset):
         
         embedding_file = ["caption_original_hyv.safetensors", "caption_florence_hyv.safetensors"][random.randint(0, 1)]
         embedding_dict = load_file(os.path.join(video_folder, embedding_file))
+        
+        return {"pixels": pixels, "embedding_dict": embedding_dict}
+
+
+class VideoDataset(Dataset):
+    def __init__(self, root_folder, resolution=512, num_frames=17, limit_samples=None, max_frame_stride=2):
+        self.root_folder = root_folder
+        self.resolution = resolution
+        self.num_frames = num_frames
+        self.max_frame_stride = max_frame_stride
+        self.videos_files = glob(os.path.join(self.root_folder, "**", "*.mp4" ), recursive=True)
+        
+        if limit_samples is not None:
+            stride = max(1, len(self.videos_files) // limit_samples)
+            self.videos_files = self.videos_files[::stride]
+            self.videos_files = self.videos_files[:limit_samples]
+        
+        self.transforms = v2.Compose([
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Resize(
+                size = self.resolution,
+                interpolation = InterpolationMode.BILINEAR,
+                antialias = True,
+            ),
+            v2.CenterCrop(size=self.resolution),
+        ])
+    
+    def __len__(self):
+        return len(self.videos_files)
+    
+    def __getitem__(self, idx):
+        vr = decord.VideoReader(self.videos_files[idx])
+        stride = min(random.randint(1, self.max_frame_stride), len(vr) // self.num_frames)
+        
+        if stride > 0:
+            seg_len = stride * self.num_frames
+            start_frame = random.randint(0, len(vr) - seg_len)
+            pixels = vr[start_frame : start_frame+seg_len : stride]
+        else:
+            pixels = vr[:]
+        
+        while pixels.shape[0] < self.num_frames:
+            pixels = torch.cat([pixels, pixels[-1].unsqueeze(0)], dim=0)
+        
+        pixels = pixels.movedim(3, 1).unsqueeze(0).contiguous() # FHWC -> FCHW -> BFCHW
+        pixels = self.transforms(pixels) * 2 - 1
+        pixels = torch.clamp(torch.nan_to_num(pixels), min=-1, max=1)
+        
+        embedding_file = os.path.splitext(self.videos_files[idx])[0] + "_hyv.safetensors"
+        embedding_dict = load_file(embedding_file)
+        
+        return {"pixels": pixels, "embedding_dict": embedding_dict}
+
+
+class CombinedDataset(Dataset):
+    def __init__(self, root_folder, token_limit=10_000, limit_samples=None, max_frame_stride=4):
+        self.root_folder = root_folder
+        self.token_limit = token_limit
+        self.max_frame_stride = max_frame_stride
+        
+        self.media_files = []
+        for ext in IMAGE_TYPES + VIDEO_TYPES:
+            self.media_files.extend(
+                glob(os.path.join(self.root_folder, "**", "*" + ext), recursive=True)
+            )
+        
+        if limit_samples is not None:
+            stride = max(1, len(self.media_files) // limit_samples)
+            self.media_files = self.media_files[::stride]
+            self.media_files = self.media_files[:limit_samples]
+    
+    def __len__(self):
+        return len(self.media_files)
+    
+    def __getitem__(self, idx):
+        ext = os.path.splitext(self.media_files[idx])[1].lower()
+        if ext in IMAGE_TYPES:
+            image = Image.open(self.media_files[idx]).convert('RGB')
+            pixels = torch.as_tensor(np.array(image)).unsqueeze(0) # FHWC
+            buckets = get_ar_buckets(pixels.shape[1], pixels.shape[0])
+            width, height = random.choice(buckets)
+        else:
+            vr = decord.VideoReader(self.media_files[idx])
+            orig_height, orig_width = vr[0].shape[:2]
+            orig_frames = len(vr)
+            
+            buckets = get_ar_buckets(orig_width, orig_height)
+            width, height = random.choice(buckets)
+            max_frames = find_max_frames(width, height, self.token_limit)
+            stride = max(min(random.randint(1, self.max_frame_stride), orig_frames // max_frames), 1)
+            
+            seg_len = min(stride * max_frames, orig_frames)
+            start_frame = random.randint(0, orig_frames - seg_len)
+            pixels = vr[start_frame : start_frame+seg_len : stride]
+            max_frames = ((pixels.shape[0] - 1) // 4) * 4 + 1
+            pixels = pixels[:max_frames] # clip frames to match vae
+        
+        transform = v2.Compose([
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Resize(size=(height, width)),
+        ])
+        
+        pixels = pixels.movedim(3, 1).unsqueeze(0).contiguous() # FHWC -> FCHW -> BFCHW
+        pixels = transform(pixels) * 2 - 1
+        pixels = torch.clamp(torch.nan_to_num(pixels), min=-1, max=1)
+        
+        embedding_file = os.path.splitext(self.media_files[idx])[0] + "_hyv.safetensors"
+        if not os.path.exists(embedding_file):
+            embedding_file = os.path.join(
+                os.path.dirname(self.media_files[idx]),
+                random.choice(["caption_original_hyv.safetensors", "caption_florence_hyv.safetensors"]),
+            )
+        
+        if os.path.exists(embedding_file):
+            embedding_dict = load_file(embedding_file)
+        else:
+            raise Exception(f"No embedding file found for {self.media_files[idx]}, you may need to precompute embeddings with --cache_embeddings")
         
         return {"pixels": pixels, "embedding_dict": embedding_dict}
 
@@ -162,27 +350,21 @@ def parse_args():
         )
     parser.add_argument(
         "--pretrained_model",
-        type=str,
-        default="./models",
-        help="Path to pretrained model base directory",
+        type = str,
+        default = "./models",
+        help = "Path to pretrained model base directory",
         )
     parser.add_argument(
-        "--train_data_dir",
+        "--dataset",
         type = str,
-        default = "E:/datasets/pexels-video/train",
-        help = "Path to train folder where each subfolder contains one video and captions",
-        )
-    parser.add_argument(
-        "--val_data_dir",
-        type = str,
-        default = "E:/datasets/pexels-video/test",
-        help = "Path to validation folder where each subfolder contains one video and captions",
+        required = True,
+        help = "Path to dataset directory with train and val subdirectories",
         )
     parser.add_argument(
         "--val_samples",
         type = int,
-        default = 8,
-        help = "Number of videos to use for testing"
+        default = 4,
+        help = "Maximum number of videos to use for validation loss"
         )
     parser.add_argument(
         "--output_dir",
@@ -196,32 +378,50 @@ def parse_args():
         default = 42,
         help = "Seed for reproducible training"
         )
+    # parser.add_argument(
+        # "--resolution",
+        # type = int,
+        # default = 512,
+        # help = "Base resolution for training/testing"
+        # )
+    # parser.add_argument(
+        # "--num_frames",
+        # type = int,
+        # default = 33,
+        # help = "Number of frames per video, must be divisible by 4+1"
+        # )
     parser.add_argument(
-        "--resolution",
+        "--token_limit",
         type = int,
-        default = 512,
-        help = "Base resolution for training/testing"
+        default = 10_000,
+        help = "Combined resolution/frame limit based on transformer patch sequence length: (width // 16) * (height // 16) * ((frames - 1) // 4 + 1)"
         )
     parser.add_argument(
-        "--num_frames",
+        "--max_frame_stride",
         type = int,
-        default = 33,
-        help = "Number of frames per video, must be divisible by 4+1"
+        default = 2,
+        help = "1: use native framerate only. Higher values allow randomly choosing lower framerates (skipping frames to speed up the video)"
         )
     parser.add_argument(
         "--learning_rate",
         type = float,
-        default = 1e-3,
+        default = 2e-4,
         help = "Base learning rate",
         )
     parser.add_argument(
         "--lora_rank",
         type = int,
-        default = 8,
+        default = 16,
         help = "The dimension of the LoRA update matrices",
         )
     parser.add_argument(
-        "--test_steps",
+        "--lora_alpha",
+        type = int,
+        default = None,
+        help = "The alpha value for LoRA, defaults to alpha=rank. Note: changing alpha will affect the learning rate, and if alpha=rank then changing rank will also affect learning rate",
+        )
+    parser.add_argument(
+        "--val_steps",
         type = int,
         default = 50,
         help = "Validate after every n steps",
@@ -235,8 +435,13 @@ def parse_args():
     parser.add_argument(
         "--max_train_steps",
         type = int,
-        default = 1_000,
+        default = 1000,
         help = "Total number of training steps",
+        )
+    parser.add_argument(
+        "--warped_noise",
+        action = "store_true",
+        help = "Use warped noise from Go-With-The-Flow instead of pure random noise",
         )
     
     args = parser.parse_args()
@@ -308,27 +513,22 @@ def cache_embeddings(args):
         return prompt_embeds, prompt_attention_mask
     
     def preprocess_captions(dataset_path):
-        folders = os.listdir(dataset_path)
-        for folder in tqdm(folders):
-            video_folder = os.path.join(dataset_path, folder)
+        caption_files = glob(os.path.join(dataset_path, "**", "*.txt" ), recursive=True)
+        for file in tqdm(caption_files):
+            embedding_path = os.path.splitext(file)[0] + "_hyv.safetensors"
             
-            for caption_file in ["caption_original.txt", "caption_florence.txt"]:
-                caption_path = os.path.join(video_folder, caption_file)
-                embedding_path = caption_path.replace(".txt", "_hyv.safetensors")
+            if not os.path.exists(embedding_path):
+                with open(file, "r") as f:
+                    caption = f.read()
                 
-                if not os.path.exists(embedding_path):
-                    with open(caption_path, "r") as f:
-                        caption = f.read()
-                    
-                    clip_embed = encode_clip(caption)
-                    llama_embed, llama_mask = encode_llama(caption)
-                    
-                    embedding_dict = {"clip_embed": clip_embed, "llama_embed": llama_embed, "llama_mask": llama_mask}
-                    save_file(embedding_dict, embedding_path)
+                clip_embed = encode_clip(caption)
+                llama_embed, llama_mask = encode_llama(caption)
+                
+                embedding_dict = {"clip_embed": clip_embed, "llama_embed": llama_embed, "llama_mask": llama_mask}
+                save_file(embedding_dict, embedding_path)
     
     print("preprocessing caption embeddings")
-    preprocess_captions(args.val_data_dir)
-    preprocess_captions(args.train_data_dir)
+    preprocess_captions(args.dataset)
     
     del tokenizer_clip, text_encoder_clip, tokenizer_llama, text_encoder_llama
     gc.collect()
@@ -356,11 +556,36 @@ def main(args):
         llama_mask = torch.cat([sample["embedding_dict"]["llama_mask"] for sample in batch], dim=0)
         return pixels, clip_embed, llama_embed, llama_mask
     
-    train_dataset = VideoDataset(
-        root_folder = args.train_data_dir,
-        resolution = args.resolution,
-        num_frames = args.num_frames,
-    )
+    train_dataset = os.path.join(args.dataset, "train")
+    if not os.path.exists(train_dataset):
+        train_dataset = args.dataset
+        print(f"WARNING: train subfolder not found, using root folder {train_dataset} as train dataset")
+    
+    val_dataset = None
+    for subfolder in ["val", "validation", "test"]:
+        subfolder_path = os.path.join(args.dataset, subfolder)
+        if os.path.exists(subfolder_path):
+            val_dataset = subfolder_path
+            break
+    
+    if val_dataset is None:
+        val_dataset = args.dataset
+        print(f"WARNING: val/validation/test subfolder not found, using root folder {val_dataset} for stable loss validation")
+        print("\033[33mThis will make it impossible to judge overfitting by the validation loss. Using a val split held out from training is highly recommended\033[m")
+    
+    with timer("scanned dataset in"):
+        train_dataset = CombinedDataset(
+            root_folder = train_dataset,
+            token_limit = args.token_limit,
+            max_frame_stride = args.max_frame_stride,
+        )
+        val_dataset = CombinedDataset(
+            root_folder = val_dataset,
+            token_limit = args.token_limit,
+            limit_samples = args.val_samples,
+            max_frame_stride = args.max_frame_stride,
+        )
+    
     train_dataloader = DataLoader(
         train_dataset,
         shuffle = True,
@@ -368,13 +593,6 @@ def main(args):
         batch_size = 1,
         num_workers = 0,
         pin_memory = True,
-    )
-    
-    val_dataset = VideoDataset(
-        root_folder = args.val_data_dir,
-        resolution = args.resolution,
-        num_frames = args.num_frames,
-        limit_samples = args.val_samples,
     )
     val_dataloader = DataLoader(
         val_dataset,
@@ -385,9 +603,7 @@ def main(args):
         pin_memory = True,
     )
     
-    # noise_scheduler = FlowMatchEulerDiscreteScheduler()#.from_pretrained(args.pretrained_model, subfolder="scheduler")
-    # print(noise_scheduler.sigmas[500])
-    # print(noise_scheduler.timesteps[500])
+    # noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model, subfolder="scheduler")
     
     with timer("loaded VAE in"):
         vae = AutoencoderKLHunyuanVideo.from_pretrained(args.pretrained_model, subfolder="vae").to(device="cuda", dtype=torch.float16)
@@ -395,14 +611,13 @@ def main(args):
         vae.enable_tiling(
             tile_sample_min_height = 256,
             tile_sample_min_width = 256,
-            tile_sample_min_num_frames = 64,
+            tile_sample_min_num_frames = 48,
             tile_sample_stride_height = 192,
             tile_sample_stride_width = 192,
-            tile_sample_stride_num_frames = 16,
+            tile_sample_stride_num_frames = 32,
         )
     
     with timer("loaded diffusion model in"):
-        # quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True,)
         quant_config = DiffusersBitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -424,18 +639,21 @@ def main(args):
     with timer("added LoRA in"):
         lora_params = []
         attn_blocks = ["transformer_blocks", "single_transformer_blocks"]
-        attn_keys = ["to_k", "to_q", "to_v", "to_out.0", "proj_mlp"]
+        lora_keys = ["to_k", "to_q", "to_v", "to_out.0", "proj_mlp"] # mmdit img attention + single blocks attention
+        # lora_keys += ["add_q_proj", "add_k_proj", "add_v_proj", "to_add_out"] # mmdit text attention
+        # lora_keys += ["ff.net", "proj_out"] # mmdit img mlp + single blocks mlp
+        # lora_keys += ["ff_context.net"] # mmdit text mlp
         for name, param in diffusion_model.named_parameters():
             name = name.replace(".weight", "").replace(".bias", "")
             for block in attn_blocks:
                 if name.startswith(block):
-                    for key in attn_keys:
+                    for key in lora_keys:
                         if key in name:
                             lora_params.append(name)
         
         lora_config = LoraConfig(
             r = args.lora_rank,
-            lora_alpha = 1,
+            lora_alpha = args.lora_alpha or args.lora_rank,
             init_lora_weights = "gaussian",
             target_modules = lora_params,
         )
@@ -450,7 +668,7 @@ def main(args):
                 total_parameters += param.numel()
     print(f"total trainable parameters: {total_parameters:,}")
     
-    # Instead of having just *one* optimizer, we will have a ``dict`` of optimizers
+    # Instead of having just one optimizer, we will have a dict of optimizers
     # for every parameter so we could reference them in our hook.
     optimizer_dict = {p: bnb.optim.AdamW8bit([p], lr=args.learning_rate) for p in lora_parameters}
     
@@ -459,9 +677,62 @@ def main(args):
         optimizer_dict[parameter].step()
         optimizer_dict[parameter].zero_grad()
     
-    # Register the hook onto every parameter
+    # Register the hook onto every trainable parameter
     for p in lora_parameters:
         p.register_post_accumulate_grad_hook(optimizer_hook)
+    
+    if args.warped_noise:
+        from noise_warp.GetWarpedNoiseFromVideo import GetWarpedNoiseFromVideo
+        get_warped_noise = GetWarpedNoiseFromVideo(raft_size="large", device="cuda", dtype=torch.float32)
+    
+    def prepare_conditions(batch):
+        pixels, clip_embed, llama_embed, llama_mask = batch
+        pixels = pixels.movedim(1, 2).to(device=vae.device, dtype=vae.dtype) # BFCHW -> BCFHW
+        latents = vae.encode(pixels).latent_dist.sample() * vae.config.scaling_factor
+        t_writer.add_scalar("debug/context_len", latents.shape[-3] * (latents.shape[-2] / 2) * (latents.shape[-1] / 2), global_step)
+        t_writer.add_scalar("debug/width", pixels.shape[-1], global_step)
+        t_writer.add_scalar("debug/height", pixels.shape[-2], global_step)
+        t_writer.add_scalar("debug/frames", pixels.shape[-3], global_step)
+        
+        if args.warped_noise:
+            noise = get_warped_noise(
+                pixels.movedim(2, 1)[0], # BCFHW -> BFCHW -> FCHW
+                noise_channels = 16,
+                target_latent_count = latents.shape[2],
+            ).movedim(0, 1).unsqueeze(0).to(latents) # FCHW -> CFHW -> BCFHW
+        else:
+            noise = torch.randn_like(latents)
+        
+        # TODO: add sd3/flux timestep density sampling?
+        sigma = torch.rand(latents.shape[0])
+        timesteps = torch.round(sigma * 1000).long()
+        sigma = sigma[:, None, None, None, None].to(latents)
+        noisy_model_input = (noise * sigma) + (latents * (1 - sigma))
+        
+        guidance_scale = 1.0
+        guidance = torch.tensor([guidance_scale] * latents.shape[0], dtype=torch.float32, device="cuda") * 1000.0
+        
+        return {
+            "target":            (noise - latents).to(device="cuda"),
+            "noisy_model_input": noisy_model_input.to(device="cuda", dtype=torch.bfloat16),
+            "timesteps":                 timesteps.to(device="cuda", dtype=torch.bfloat16),
+            "llama_embed":             llama_embed.to(device="cuda", dtype=torch.bfloat16),
+            "llama_mask":               llama_mask.to(device="cuda", dtype=torch.bfloat16),
+            "clip_embed":               clip_embed.to(device="cuda", dtype=torch.bfloat16),
+            "guidance":                   guidance.to(device="cuda", dtype=torch.bfloat16),
+        }
+    
+    def predict_loss(conditions):
+        pred = diffusion_model(
+            hidden_states          = conditions["noisy_model_input"],
+            timestep               = conditions["timesteps"],
+            encoder_hidden_states  = conditions["llama_embed"],
+            encoder_attention_mask = conditions["llama_mask"],
+            pooled_projections     = conditions["clip_embed"],
+            guidance               = conditions["guidance"],
+            return_dict = False,
+        )[0]
+        return F.mse_loss(pred.float(), conditions["target"].float())
     
     gc.collect()
     torch.cuda.empty_cache()
@@ -471,47 +742,32 @@ def main(args):
     progress_bar = tqdm(range(0, args.max_train_steps))
     while global_step < args.max_train_steps:
         for step, batch in enumerate(train_dataloader):
-            pixels, clip_embed, llama_embed, llama_mask = batch
-            
+            start_step = perf_counter()
             with torch.inference_mode():
-                pixels = pixels.movedim(1, 2).to(device=vae.device, dtype=vae.dtype) # BFCHW -> BCFHW
-                latents = vae.encode(pixels).latent_dist.sample() * vae.config.scaling_factor
-                
-                noise = torch.randn_like(latents)
-                # add sd3/flux timestep density sampling
-                sigma = torch.rand(latents.shape[0])
-                timesteps = torch.round(sigma * 1000).long()
-                sigma = sigma[:, None, None, None, None].to(latents)
-                noisy_model_input = noise * sigma + latents * (1 - sigma)
-                
-                guidance_scale = 1.0
-                guidance = torch.tensor([guidance_scale] * latents.shape[0], dtype=torch.float32, device="cuda") * 1000.0
+                conditions = prepare_conditions(batch)
             
             torch.cuda.empty_cache()
-            pred = diffusion_model(
-                hidden_states           =  noisy_model_input.to(device="cuda", dtype=torch.bfloat16),
-                timestep                =          timesteps.to(device="cuda", dtype=torch.bfloat16),
-                encoder_hidden_states   =        llama_embed.to(device="cuda", dtype=torch.bfloat16),
-                encoder_attention_mask  =         llama_mask.to(device="cuda", dtype=torch.bfloat16),
-                pooled_projections      =         clip_embed.to(device="cuda", dtype=torch.bfloat16),
-                guidance                =           guidance.to(device="cuda", dtype=torch.bfloat16),
-                return_dict = False,
-            )[0]
-            loss = F.mse_loss(pred.float(), (noise - latents).to(pred.device).float())
+            loss = predict_loss(conditions)
             t_writer.add_scalar("loss/train", loss.detach().item(), global_step)
-            progress_bar.set_postfix({'loss': f"{loss.detach().item():0.3f}"})
             
             loss.backward()
+            
             progress_bar.update(1)
             global_step += 1
             torch.cuda.empty_cache()
+            t_writer.add_scalar("debug/step_time", perf_counter() - start_step, global_step)
             
-            # if global_step == 1 or global_step % val_steps == 0:
-                # with torch.inference_mode(), temp_rng(val_seed):
-                    # val_loss = 0.0
-                    # for step, batch in enumerate(tqdm(val_dataloader, desc="validation", leave=False)):
-                        # val_loss += get_pred(batch, timestep_range=(100, 900))[0].detach().item()
-                    # t_writer.add_scalar("loss/validation", val_loss / len(val_dataloader), global_step * batch_size)
+            if global_step == 1 or global_step % args.val_steps == 0:
+                with torch.inference_mode(), temp_rng(args.seed):
+                    val_loss = 0.0
+                    for step, batch in enumerate(tqdm(val_dataloader, desc="validation", leave=False)):
+                        conditions = prepare_conditions(batch)
+                        torch.cuda.empty_cache()
+                        loss = predict_loss(conditions)
+                        val_loss += loss.detach().item()
+                        torch.cuda.empty_cache()
+                    t_writer.add_scalar("loss/validation", val_loss / len(val_dataloader), global_step)
+                progress_bar.unpause()
             
             if global_step >= args.max_train_steps or global_step % args.checkpointing_steps == 0:
                 save_file(
@@ -524,7 +780,8 @@ def main(args):
 
 # train
     # basic t2i and randn noise to start
-    # guidance?
+    # guidance=1
+    # uncond/caption dropout?
 
 
 if __name__ == "__main__":
@@ -534,7 +791,7 @@ if __name__ == "__main__":
         download_model()
         exit()
     
-    if args.cache_embeddings:
+    if args.cache_embeddings and args.dataset != "pexels":
         cache_embeddings(args)
         exit()
     

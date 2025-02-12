@@ -6,3 +6,6 @@ bitsandbytes
 tensorboard
 decord
 peft
+imageio
+imageio-ffmpeg
+einops
