@@ -3,6 +3,7 @@ import gc
 import random
 import numpy as np
 import argparse
+import json
 import datetime
 from tqdm import tqdm
 import decord
@@ -479,6 +480,8 @@ def main(args):
     real_output_dir = make_dir(args.output_dir, date_time)
     checkpoint_dir = make_dir(real_output_dir, "checkpoints")
     t_writer = SummaryWriter(log_dir=real_output_dir, flush_secs=60)
+    with open(os.path.join(real_output_dir, "command_args.json"), "w") as f:
+        json.dump(args.__dict__, f, indent=4)
     
     def collate_batch(batch):
         pixels = torch.cat([sample["pixels"] for sample in batch], dim=0)
