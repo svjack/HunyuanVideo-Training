@@ -255,13 +255,21 @@ def make_dir(base, folder):
     return new_dir
 
 
-def download_model():
+def download_model(args):
     from huggingface_hub import snapshot_download
     snapshot_download(
         repo_type = "model",
         repo_id = "hunyuanvideo-community/HunyuanVideo",
         local_dir = "./models",
         max_workers = 1,
+    )
+    
+    if args.skyreels_i2v:
+        snapshot_download(
+            repo_type = "model",
+            repo_id = "Skywork/SkyReels-V1-Hunyuan-I2V",
+            local_dir = "./models/transformer-skyreels-i2v",
+            max_workers = 1,
         )
 
 
@@ -274,6 +282,11 @@ def parse_args():
         "--download_model",
         action = "store_true",
         help = "auto download hunyuanvideo-community/HunyuanVideo to ./models if it's missing",
+        )
+    parser.add_argument(
+        "--skyreels_i2v",
+        action = "store_true",
+        help = "download/train skyreels image to video model",
         )
     parser.add_argument(
         "--cache_embeddings",
@@ -563,9 +576,14 @@ def main(args):
             bnb_4bit_compute_dtype=torch.bfloat16
         )
         
+        if args.skyreels_i2v:
+            transformer_subfolder = "transformer-skyreels-i2v"
+        else:
+            transformer_subfolder = "transformer"
+        
         diffusion_model = HunyuanVideoTransformer3DModel.from_pretrained(
             args.pretrained_model,
-            subfolder = "transformer",
+            subfolder = transformer_subfolder,
             quantization_config = quant_config,
             torch_dtype = torch.bfloat16,
         )
@@ -627,6 +645,13 @@ def main(args):
         pixels, clip_embed, llama_embed, llama_mask = batch
         pixels = pixels.movedim(1, 2).to(device=vae.device, dtype=vae.dtype) # BFCHW -> BCFHW
         latents = vae.encode(pixels).latent_dist.sample() * vae.config.scaling_factor
+        
+        if args.skyreels_i2v:
+            image_cond_latents = torch.zeros_like(latents)
+            image_latents = vae.encode(pixels[:, :, 0].unsqueeze(2)).latent_dist.sample() * vae.config.scaling_factor
+            image_cond_latents[:, :, 0] = image_latents[:, :, 0]
+            del image_latents
+        
         t_writer.add_scalar("debug/context_len", latents.shape[-3] * (latents.shape[-2] / 2) * (latents.shape[-1] / 2), global_step)
         t_writer.add_scalar("debug/width", pixels.shape[-1], global_step)
         t_writer.add_scalar("debug/height", pixels.shape[-2], global_step)
@@ -647,6 +672,9 @@ def main(args):
         timesteps = torch.round(sigma * 1000).long()
         sigma = sigma[:, None, None, None, None].to(latents)
         noisy_model_input = (noise * sigma) + (latents * (1 - sigma))
+        
+        if args.skyreels_i2v:
+            noisy_model_input = torch.cat([noisy_model_input, image_cond_latents], dim=1)
         
         guidance_scale = 1.0
         guidance = torch.tensor([guidance_scale] * latents.shape[0], dtype=torch.float32, device="cuda") * 1000.0
@@ -727,7 +755,7 @@ if __name__ == "__main__":
     args = parse_args()
     
     if args.download_model:
-        download_model()
+        download_model(args)
         exit()
     
     if args.cache_embeddings and args.dataset != "pexels":
