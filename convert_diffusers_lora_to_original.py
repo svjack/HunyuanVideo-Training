@@ -25,9 +25,6 @@ def convert_lora_sd(diffusers_lora_sd):
 
     converted_lora_sd = {}
     for key in diffusers_lora_sd.keys():
-        if key.startswith("transformer."):
-            key = key.replace("transformer.", "", 1)
-
         # txt_in.individual_token_refiner
         if key.startswith("context_embedder.token_refiner"):
             if key.endswith("to_q.lora_A.weight"):

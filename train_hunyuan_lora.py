@@ -300,6 +300,12 @@ def parse_args():
         help = "Path to pretrained model base directory",
         )
     parser.add_argument(
+        "--init_lora",
+        type = str,
+        default = None,
+        help = "LoRA checkpoint to load instead of random init, must be the same rank and target layers",
+        )
+    parser.add_argument(
         "--dataset",
         type = str,
         required = True,
@@ -614,6 +620,13 @@ def main(args):
             target_modules = lora_params,
         )
         diffusion_model.add_adapter(lora_config)
+        
+        if args.init_lora is not None:
+            loaded_lora_sd = load_file(args.init_lora)
+            outcome = set_peft_model_state_dict(diffusion_model, loaded_lora_sd)
+            if len(outcome.unexpected_keys) > 0:
+                for key in outcome.unexpected_keys:
+                    print(key)
         
         lora_parameters = []
         total_parameters = 0
