@@ -300,6 +300,13 @@ def parse_args():
         help = "Path to pretrained model base directory",
         )
     parser.add_argument(
+        "--quant_type",
+        type = str,
+        default = "nf4",
+        help = "Bit depth for the base model, default config with nf4=16GB",
+        choices=["nf4", "int8", "bf16"],
+        )
+    parser.add_argument(
         "--init_lora",
         type = str,
         default = None,
@@ -575,12 +582,17 @@ def main(args):
         )
     
     with timer("loaded diffusion model in"):
-        quant_config = DiffusersBitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16
-        )
+        if args.quant_type == "nf4":
+            quant_config = DiffusersBitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16
+            )
+        elif args.quant_type == "int8":
+            quant_config = DiffusersBitsAndBytesConfig(load_in_8bit=True)
+        else:
+            quant_config = None
         
         if args.skyreels_i2v:
             transformer_subfolder = "transformer-skyreels-i2v"
