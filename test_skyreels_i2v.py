@@ -87,6 +87,13 @@ def main(args):
         subfolder = "transformer-skyreels-i2v",
         torch_dtype = torch.bfloat16,
     )
+
+    lora_sd = "outputs/2025-02-25_05-10-51/checkpoints/hyv-lora-00001000.safetensors"
+    lora_weight = 1.0
+    transformer.load_lora_adapter(lora_sd, adapter_name="default_lora")
+    transformer.set_adapters(adapter_names = "default_lora", weights = lora_weight)
+
+    print("lora loaded")
     
     pipe = HunyuanVideoPipeline.from_pretrained(
         args.pretrained_model,
