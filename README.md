@@ -7,13 +7,17 @@ Don't expect much support, as this is primarily for my own use, but I'm sharing 
 ## Install
 
 ```
-git clone https://github.com/spacepxl/HunyuanVideo-Training
+sudo apt-get update && sudo apt-get install cbm git-lfs ffmpeg
+
+git clone https://github.com/svjack/HunyuanVideo-Training
 cd HunyuanVideo-Training
+pip install torch torchvision
+pip install -r requirements.txt
 
-python -m venv .venv
-.venv\Scripts\activate
+#python -m venv .venv
+#.venv\Scripts\activate
 
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
 (or follow whatever approach you prefer for environment management and pytorch/triton/etc)
