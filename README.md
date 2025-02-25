@@ -170,7 +170,7 @@ while True:
 
 ## Inference
 ```bash
-python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000500.safetensors" --prompt="The video showcases a charming anime-style scene featuring a pink-haired girl with angel wings. She's seated at a desk, enjoying a donut while working on a laptop. The setting is a cozy, pastel-colored room with a pink chair, a milk carton, and a coffee cup. The girl's expression is one of delight as she savors her treat." --alpha=16
+python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000500.safetensors" --prompt="The video showcases a pixel art animation featuring charming anime-style scene featuring a pink-haired girl with angel wings. She's seated at a desk, enjoying a donut while working on a laptop. The setting is a cozy, pastel-colored room with a pink chair, a milk carton, and a coffee cup. The girl's expression is one of delight as she savors her treat." --alpha=16
 ```
 
 ## After training
