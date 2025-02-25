@@ -1,3 +1,5 @@
+from transformers import CLIPTextModel, CLIPTokenizerFast, LlamaModel, LlamaTokenizerFast
+
 import os
 import gc
 import random
