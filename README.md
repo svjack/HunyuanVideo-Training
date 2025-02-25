@@ -169,9 +169,34 @@ while True:
 ```
 
 ## Inference
+- Girl Demo
+
 ```bash
-python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000500.safetensors" --prompt="The video showcases a pixel art animation featuring charming anime-style scene featuring a pink-haired girl with angel wings. She's seated at a desk, enjoying a donut while working on a laptop. The setting is a cozy, pastel-colored room with a pink chair, a milk carton, and a coffee cup. The girl's expression is one of delight as she savors her treat." --alpha=16
+python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000600.safetensors" --prompt="The video showcases a pixel art animation featuring charming anime-style scene featuring a pink-haired girl with angel wings. She's seated at a desk, enjoying a donut while working on a laptop. The setting is a cozy, pastel-colored room with a pink chair, a milk carton, and a coffee cup. The girl's expression is one of delight as she savors her treat." --alpha=16
 ```
+
+without lora
+
+https://github.com/user-attachments/assets/9113008e-850a-43c3-896c-97bc5053a423
+
+with lora
+
+https://github.com/user-attachments/assets/6ba0236c-35ae-4367-b8ea-71ab287a4e70
+
+- Snow hill Demo
+
+```bash
+python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000600.safetensors" --prompt="The video showcases a pixel art animation featuring a serene and majestic snowy mountain landscape. The scene is dominated by towering peaks covered in pristine white snow, with a soft gradient of blue and purple hues in the sky. A small cabin with a smoking chimney sits at the base of the mountain, surrounded by pine trees dusted with snow. A winding path leads up the mountain, with footprints visible in the snow. The atmosphere is calm and peaceful, evoking a sense of solitude and wonder." --alpha=16
+```
+
+without lora
+
+https://github.com/user-attachments/assets/f3806a62-caa0-416b-97f9-b7cae689d818
+
+with lora
+
+https://github.com/user-attachments/assets/1d7dbd41-c036-4a57-bd90-2f7341623915
+
 
 ## After training
 
