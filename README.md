@@ -102,6 +102,77 @@ For image to video training, use `--skyreels_i2v` to load the skyreels model and
 
 Warped noise from [Go With The Flow](https://eyeline-research.github.io/Go-with-the-Flow/) can be enabled by `--warped_noise`, note that this will take longer to adapt to than normal random noise, so it's more for general adapter training than character/style loras, and you should use a large dataset, ideally larger than the number of training steps.
 
+## Loss
+```python
+import matplotlib.pyplot as plt
+from tensorboard.backend.event_processing import event_accumulator
+import time
+from IPython.display import clear_output
+import pandas as pd
+
+# 定义事件文件路径
+event_file_path = "outputs/2025-02-25_13-42-37/events.out.tfevents.1740490957.featurize.119960.0"
+
+# 创建 EventAccumulator 对象
+event_acc = event_accumulator.EventAccumulator(event_file_path)
+
+# 加载事件数据
+event_acc.Reload()
+
+# 定义窗口大小
+window_size = 10  # 可以根据需要调整窗口大小
+
+# 主循环，每秒刷新一次
+while True:
+    # 清除之前的输出
+    clear_output(wait=True)
+    
+    # 重新加载事件数据
+    event_acc.Reload()
+    
+    # 获取所有标签
+    tags = event_acc.Tags()
+    
+    # 检查是否存在 'loss/train' 数据
+    if 'scalars' in tags and 'loss/train' in tags['scalars']:
+        # 提取 'loss/train' 数据
+        train_loss_events = event_acc.Scalars('loss/train')
+        
+        # 提取步骤和损失值
+        steps = [event.step for event in train_loss_events]
+        values = [event.value for event in train_loss_events]
+        
+        # 将数据转换为 Pandas DataFrame
+        df = pd.DataFrame({'steps': steps, 'values': values})
+        
+        # 计算滑动窗口均值
+        df['smoothed_values'] = df['values'].rolling(window=window_size, min_periods=1).mean()
+        
+        # 绘制原始 loss/train 曲线
+        plt.figure(figsize=(10, 6))
+        plt.plot(df['steps'], df['values'], label='Train Loss (Raw)', color='blue', alpha=0.3)
+        
+        # 绘制平滑后的 loss/train 曲线
+        plt.plot(df['steps'], df['smoothed_values'], label=f'Train Loss (Smoothed, Window={window_size})', color='red')
+        
+        plt.title('Training Loss Over Steps')
+        plt.xlabel('Steps')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+    else:
+        print("No 'loss/train' data found in the event file.")
+    
+    # 等待 1 秒
+    time.sleep(1)
+```
+
+## Inference
+```bash
+python test_hunyuan_lora.py --lora="hunyuan_pixel_lora_outputs/outputs/2025-02-25_13-42-37/checkpoints/hyv-lora-00000500.safetensors" --prompt="The video showcases a charming anime-style scene featuring a pink-haired girl with angel wings. She's seated at a desk, enjoying a donut while working on a laptop. The setting is a cozy, pastel-colored room with a pink chair, a milk carton, and a coffee cup. The girl's expression is one of delight as she savors her treat." --alpha=16
+```
+
 ## After training
 
 The saved lora checkpoints are in diffusers format, so if you want to use them with the original tencent model (or in comfyui), you'll need to convert them:
