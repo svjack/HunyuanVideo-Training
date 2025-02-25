@@ -317,7 +317,7 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type = str,
-        required = True,
+        #required = True,
         help = "Path to dataset directory with train and val subdirectories",
         )
     parser.add_argument(
