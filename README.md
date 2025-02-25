@@ -179,9 +179,15 @@ without lora
 
 https://github.com/user-attachments/assets/9113008e-850a-43c3-896c-97bc5053a423
 
-with lora
+with lora 600 atep
 
 https://github.com/user-attachments/assets/6ba0236c-35ae-4367-b8ea-71ab287a4e70
+
+with lora 700 atep
+
+https://github.com/user-attachments/assets/46025faf-16b5-40d4-9bfb-f4d8a081f004
+
+
 
 - Snow hill Demo
 
@@ -193,9 +199,17 @@ without lora
 
 https://github.com/user-attachments/assets/f3806a62-caa0-416b-97f9-b7cae689d818
 
-with lora
+with lora 600 atep
 
 https://github.com/user-attachments/assets/1d7dbd41-c036-4a57-bd90-2f7341623915
+
+with lora 700 atep
+
+
+https://github.com/user-attachments/assets/e89ecff9-7c0b-4467-b443-1bb7ba0b3eb5
+
+
+
 
 
 ## After training
