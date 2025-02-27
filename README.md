@@ -89,7 +89,7 @@ python train_hunyuan_lora.py --dataset "example/dataset" --cache_embeddings
 ## Training
 
 ```
-python train_hunyuan_lora.py --dataset "example/dataset"
+python train_hunyuan_lora.py --dataset "example/dataset" --max_train_steps 3000
 ```
 
 All other arguments are optional, the defaults should be a reasonable starting point.
