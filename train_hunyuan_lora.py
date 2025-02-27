@@ -153,7 +153,8 @@ class CombinedDataset(Dataset):
         if ext in IMAGE_TYPES:
             image = Image.open(self.media_files[idx]).convert('RGB')
             pixels = torch.as_tensor(np.array(image)).unsqueeze(0) # FHWC
-            buckets = self.get_ar_buckets(pixels.shape[1], pixels.shape[0])
+            #buckets = self.get_ar_buckets(pixels.shape[1], pixels.shape[0])
+            buckets = self.get_ar_buckets(pixels.shape[2], pixels.shape[1])
             width, height = random.choice(buckets)
         else:
             vr = decord.VideoReader(self.media_files[idx])
