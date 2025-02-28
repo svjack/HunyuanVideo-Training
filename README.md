@@ -13,6 +13,7 @@ git clone https://github.com/svjack/HunyuanVideo-Training
 cd HunyuanVideo-Training
 pip install torch torchvision
 pip install -r requirements.txt
+pip install moviepy==1.0.3 opencv-python
 
 #python -m venv .venv
 #.venv\Scripts\activate
