@@ -89,6 +89,10 @@ python train_hunyuan_lora.py --dataset "example/dataset" --cache_embeddings
 
 ## Training
 
+```bash
+python train_hunyuan_lora_4090.py --dataset "example/dataset" --max_train_steps 50000 --checkpointing_steps 500
+```
+
 ```
 python train_hunyuan_lora.py --dataset "example/dataset" --max_train_steps 3000
 ```
